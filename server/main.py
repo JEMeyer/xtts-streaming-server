@@ -5,6 +5,7 @@ import tempfile
 import wave
 import torch
 import numpy as np
+import threading
 from typing import List
 from pydantic import BaseModel
 
@@ -19,7 +20,7 @@ from TTS.utils.manage import ModelManager
 torch.set_num_threads(int(os.environ.get("NUM_THREADS", os.cpu_count())))
 device = torch.device("cuda" if os.environ.get("USE_CPU", "0") == "0" else "cpu")
 if not torch.cuda.is_available() and device == "cuda":
-    raise RuntimeError("CUDA device unavailable, please use Dockerfile.cpu instead.") 
+    raise RuntimeError("CUDA device unavailable, please use Dockerfile.cpu instead.")
 
 custom_model_path = os.environ.get("CUSTOM_MODEL_PATH", "/app/tts_models")
 
@@ -44,6 +45,9 @@ print("XTTS Loaded.", flush=True)
 
 print("Running XTTS Server ...", flush=True)
 
+lock = threading.Lock()  # Create a lock object
+print("Establishing lock ...", flush=True)
+
 ##### Run fastapi #####
 app = FastAPI(
     title="XTTS Streaming server",
@@ -52,20 +56,20 @@ app = FastAPI(
     docs_url="/",
 )
 
-
 @app.post("/clone_speaker")
 def predict_speaker(wav_file: UploadFile):
-    """Compute conditioning inputs from reference audio file."""
-    temp_audio_name = next(tempfile._get_candidate_names())
-    with open(temp_audio_name, "wb") as temp, torch.inference_mode():
-        temp.write(io.BytesIO(wav_file.file.read()).getbuffer())
-        gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
-            temp_audio_name
-        )
-    return {
-        "gpt_cond_latent": gpt_cond_latent.cpu().squeeze().half().tolist(),
-        "speaker_embedding": speaker_embedding.cpu().squeeze().half().tolist(),
-    }
+    with lock:
+        """Compute conditioning inputs from reference audio file."""
+        temp_audio_name = next(tempfile._get_candidate_names())
+        with open(temp_audio_name, "wb") as temp, torch.inference_mode():
+            temp.write(io.BytesIO(wav_file.file.read()).getbuffer())
+            gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
+                temp_audio_name
+            )
+        return {
+            "gpt_cond_latent": gpt_cond_latent.cpu().squeeze().half().tolist(),
+            "speaker_embedding": speaker_embedding.cpu().squeeze().half().tolist(),
+        }
 
 
 def postprocess(wav):
@@ -137,10 +141,11 @@ def predict_streaming_generator(parsed_input: dict = Body(...)):
 
 @app.post("/tts_stream")
 def predict_streaming_endpoint(parsed_input: StreamingInputs):
-    return StreamingResponse(
-        predict_streaming_generator(parsed_input),
-        media_type="audio/wav",
-    )
+    with lock:
+        return StreamingResponse(
+            predict_streaming_generator(parsed_input),
+            media_type="audio/wav",
+        )
 
 class TTSInputs(BaseModel):
     speaker_embedding: List[float]
@@ -150,36 +155,39 @@ class TTSInputs(BaseModel):
 
 @app.post("/tts")
 def predict_speech(parsed_input: TTSInputs):
-    speaker_embedding = torch.tensor(parsed_input.speaker_embedding).unsqueeze(0).unsqueeze(-1)
-    gpt_cond_latent = torch.tensor(parsed_input.gpt_cond_latent).reshape((-1, 1024)).unsqueeze(0)
-    text = parsed_input.text
-    language = parsed_input.language
+    with lock:
+        speaker_embedding = torch.tensor(parsed_input.speaker_embedding).unsqueeze(0).unsqueeze(-1)
+        gpt_cond_latent = torch.tensor(parsed_input.gpt_cond_latent).reshape((-1, 1024)).unsqueeze(0)
+        text = parsed_input.text
+        language = parsed_input.language
 
-    out = model.inference(
-        text,
-        language,
-        gpt_cond_latent,
-        speaker_embedding,
-    )
+        out = model.inference(
+            text,
+            language,
+            gpt_cond_latent,
+            speaker_embedding,
+        )
 
-    wav = postprocess(torch.tensor(out["wav"]))
+        wav = postprocess(torch.tensor(out["wav"]))
 
-    return encode_audio_common(wav.tobytes())
+        return encode_audio_common(wav.tobytes())
 
 
 @app.get("/studio_speakers")
 def get_speakers():
-    if hasattr(model, "speaker_manager") and hasattr(model.speaker_manager, "speakers"):
-        return {
-            speaker: {
-                "speaker_embedding": model.speaker_manager.speakers[speaker]["speaker_embedding"].cpu().squeeze().half().tolist(),
-                "gpt_cond_latent": model.speaker_manager.speakers[speaker]["gpt_cond_latent"].cpu().squeeze().half().tolist(),
+    with lock:
+        if hasattr(model, "speaker_manager") and hasattr(model.speaker_manager, "speakers"):
+            return {
+                speaker: {
+                    "speaker_embedding": model.speaker_manager.speakers[speaker]["speaker_embedding"].cpu().squeeze().half().tolist(),
+                    "gpt_cond_latent": model.speaker_manager.speakers[speaker]["gpt_cond_latent"].cpu().squeeze().half().tolist(),
+                }
+                for speaker in model.speaker_manager.speakers.keys()
             }
-            for speaker in model.speaker_manager.speakers.keys()
-        }
-    else:
-        return {}
-        
+        else:
+            return {}
+
 @app.get("/languages")
 def get_languages():
-    return config.languages
+    with lock:
+        return config.languages
