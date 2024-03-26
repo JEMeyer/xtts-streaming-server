@@ -19,7 +19,7 @@ from TTS.utils.manage import ModelManager
 torch.set_num_threads(int(os.environ.get("NUM_THREADS", os.cpu_count())))
 device = torch.device("cuda" if os.environ.get("USE_CPU", "0") == "0" else "cpu")
 if not torch.cuda.is_available() and device == "cuda":
-    raise RuntimeError("CUDA device unavailable, please use Dockerfile.cpu instead.") 
+    raise RuntimeError("CUDA device unavailable, please use Dockerfile.cpu instead.")
 
 custom_model_path = os.environ.get("CUSTOM_MODEL_PATH", "/app/tts_models")
 
@@ -51,6 +51,10 @@ app = FastAPI(
     version="0.0.1",
     docs_url="/",
 )
+
+# Disable threading and processes
+app.config['THREADING'] = False
+app.config['PROCESSPOOL_REUSE'] = False
 
 
 @app.post("/clone_speaker")
@@ -179,7 +183,7 @@ def get_speakers():
         }
     else:
         return {}
-        
+
 @app.get("/languages")
 def get_languages():
     return config.languages
