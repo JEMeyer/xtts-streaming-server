@@ -81,3 +81,6 @@ $ cd xtts-streaming-server/test
 $ python -m pip install -r requirements.txt
 $ python test_streaming.py
 ```
+
+### Forked Repos
+If forked, GitHub action will  automatically build and push a Docker image to your container registry - so it will be ghcr.io/yourusername/xtts-streaming-server.
